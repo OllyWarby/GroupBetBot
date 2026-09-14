@@ -87,6 +87,15 @@ def team_with_early_payout_lead(new: MatchSnapshot) -> tuple[str, int, int, str]
     return None
 
 
+def is_winning_leg(team_score: int, opp_score: int, locked_win: bool) -> bool:
+    """Accumulator settlement rule, shared by the poller's live status
+    display and the /acc newbet archiver so they can't drift apart: a
+    draw doesn't count as a win, and a locked-in early-payout lead (see
+    team_with_early_payout_lead) counts as a win regardless of the score.
+    """
+    return locked_win or team_score > opp_score
+
+
 def next_fixture_from_team_profile(payload: dict, team_name: str) -> tuple[datetime, str, bool] | None:
     """Extract the next scheduled fixture (kickoff time, opponent name, is_home)
     from a `/teams/{id}` payload's `team.nextEvent` list. Returns None if there's

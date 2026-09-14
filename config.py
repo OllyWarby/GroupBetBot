@@ -39,6 +39,56 @@ TEAM_CACHE_FILE = os.path.join(DATA_DIR, "team_cache.json")
 MATCH_STATE_FILE = os.path.join(DATA_DIR, "match_state.json")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 STANDINGS_FILE = os.path.join(DATA_DIR, "standings.json")
+ROSTER_FILE = os.path.join(DATA_DIR, "roster.json")
+PEOPLE_FILE = os.path.join(DATA_DIR, "people.json")
 
 ACC_SLOTS = ("1", "2")
 TEAMS_PER_ACC = 4
+
+# The Odds API (the-odds-api.com) - free tier used for match-winner (h2h)
+# prices. See services/odds_client.py for the provider-isolation rationale.
+#
+# Master switch: off by default. While this is false, odds_client makes no
+# network calls at all (not even to check a key) - /acc set just shows
+# "odds unavailable" everywhere, same as if the feature didn't exist. Flip
+# ODDS_ENABLED=true in .env once you've got a free API key to actually use.
+ODDS_ENABLED = os.getenv("ODDS_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+ODDS_API_KEY = os.getenv("ODDS_API_KEY")
+ODDS_API_BASE_URL = "https://api.the-odds-api.com/v4"
+ODDS_REGIONS = "uk"
+ODDS_MARKET = "h2h"
+ODDS_FORMAT = "decimal"
+
+# The Odds API doesn't publish stable sport_key names for every league we
+# track, and League One/Two coverage isn't confirmed at all - so instead of
+# hardcoding guessed keys, services/odds_client.py looks up the sport list
+# by matching these title keywords (case-insensitive substring match).
+ODDS_LEAGUE_TITLE_HINTS = {
+    "epl": ("premier league",),
+    "championship": ("championship",),
+    "league_one": ("league 1", "league one"),
+    "league_two": ("league 2", "league two"),
+}
+
+# Other countries/competitions can collide with the hints above (Scotland
+# also has a "Championship", Wales a "Premier League", etc). If a title
+# matches a hint but also matches one of these, skip it rather than risk
+# silently binding to the wrong country's competition.
+ODDS_LEAGUE_EXCLUDE_HINTS = (
+    "scotland",
+    "scottish",
+    "wales",
+    "welsh",
+    "ireland",
+    "irish",
+    "women",
+    "u21",
+    "u23",
+    "youth",
+)
+
+# How long (seconds) to reuse a league's fetched odds board before asking
+# the API again. One /acc set call can involve several teams from the same
+# league (e.g. two League One picks) - without this, each of those re-fetches
+# the whole board, burning free-tier credits on data already in hand.
+ODDS_BOARD_CACHE_SECONDS = 300
