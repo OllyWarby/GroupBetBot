@@ -69,3 +69,26 @@ ODDS_LEAGUE_TITLE_HINTS = {
     "league_one": ("league 1", "league one"),
     "league_two": ("league 2", "league two"),
 }
+
+# Other countries/competitions can collide with the hints above (Scotland
+# also has a "Championship", Wales a "Premier League", etc). If a title
+# matches a hint but also matches one of these, skip it rather than risk
+# silently binding to the wrong country's competition.
+ODDS_LEAGUE_EXCLUDE_HINTS = (
+    "scotland",
+    "scottish",
+    "wales",
+    "welsh",
+    "ireland",
+    "irish",
+    "women",
+    "u21",
+    "u23",
+    "youth",
+)
+
+# How long (seconds) to reuse a league's fetched odds board before asking
+# the API again. One /acc set call can involve several teams from the same
+# league (e.g. two League One picks) - without this, each of those re-fetches
+# the whole board, burning free-tier credits on data already in hand.
+ODDS_BOARD_CACHE_SECONDS = 300

@@ -15,6 +15,7 @@ pattern as services/espn_client.py.
 
 import asyncio
 import logging
+import time
 
 import aiohttp
 
@@ -26,6 +27,8 @@ from config import (
     ODDS_MARKET,
     ODDS_FORMAT,
     ODDS_LEAGUE_TITLE_HINTS,
+    ODDS_LEAGUE_EXCLUDE_HINTS,
+    ODDS_BOARD_CACHE_SECONDS,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,11 +49,15 @@ def _normalize(name: str) -> str:
 class OddsClient:
     def __init__(self):
         self._session: aiohttp.ClientSession | None = None
-        # league_key -> sport_key, or None if we've already checked and
-        # this provider doesn't cover that league. Cached for the process
-        # lifetime since the sport list rarely changes.
+        # league_key -> sport_key, or None if we've confirmed this
+        # provider doesn't cover that league. Cached for the process
+        # lifetime since the sport list rarely changes - but only once we
+        # actually got a successful answer (see _sport_key_for_league), so
+        # a transient fetch failure doesn't get cached as "not covered".
         self._sport_key_cache: dict[str, str | None] = {}
         self._sports_list_cache: list[dict] | None = None
+        # sport_key -> (fetched_at, events) - see ODDS_BOARD_CACHE_SECONDS.
+        self._odds_board_cache: dict[str, tuple[float, list]] = {}
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -102,20 +109,43 @@ class OddsClient:
         if league_key in self._sport_key_cache:
             return self._sport_key_cache[league_key]
 
-        hints = ODDS_LEAGUE_TITLE_HINTS.get(league_key, ())
-        sport_key = None
         try:
             sports = await self._get_sports_list()
-            for sport in sports:
-                title = _normalize(sport.get("title", ""))
-                if sport.get("group") == "Soccer" and any(hint in title for hint in hints):
-                    sport_key = sport.get("key")
-                    break
         except OddsClientError as e:
+            # Don't cache a fetch failure as "not covered" - a transient
+            # blip should just be retried on the next call, not lock this
+            # league out of odds for the rest of the process's life.
             logger.warning("Could not fetch odds sports list: %s", e)
+            return None
 
-        self._sport_key_cache[league_key] = sport_key
+        hints = ODDS_LEAGUE_TITLE_HINTS.get(league_key, ())
+        sport_key = None
+        for sport in sports:
+            if sport.get("group") != "Soccer":
+                continue
+            title = _normalize(sport.get("title", ""))
+            if not any(hint in title for hint in hints):
+                continue
+            if any(exclude in title for exclude in ODDS_LEAGUE_EXCLUDE_HINTS):
+                continue
+            sport_key = sport.get("key")
+            break
+
+        self._sport_key_cache[league_key] = sport_key  # real answer either way - safe to cache
         return sport_key
+
+    async def _get_odds_board(self, sport_key: str) -> list[dict]:
+        cached = self._odds_board_cache.get(sport_key)
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < ODDS_BOARD_CACHE_SECONDS:
+            return cached[1]
+
+        events = await self._get(
+            f"/sports/{sport_key}/odds",
+            {"regions": ODDS_REGIONS, "markets": ODDS_MARKET, "oddsFormat": ODDS_FORMAT},
+        )
+        self._odds_board_cache[sport_key] = (now, events)
+        return events
 
     async def get_best_price(self, league_key: str, team_name: str) -> tuple[float, str] | None:
         """Best (highest) decimal price for `team_name` to win their next
@@ -134,10 +164,7 @@ class OddsClient:
             return None
 
         try:
-            events = await self._get(
-                f"/sports/{sport_key}/odds",
-                {"regions": ODDS_REGIONS, "markets": ODDS_MARKET, "oddsFormat": ODDS_FORMAT},
-            )
+            events = await self._get_odds_board(sport_key)
         except OddsClientError as e:
             logger.warning("Could not fetch odds for %s: %s", sport_key, e)
             return None

@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 
 import discord
@@ -14,7 +15,7 @@ from config import (
     TEAMS_PER_ACC,
 )
 from services.espn_client import EspnClientError
-from services.event_detector import next_fixture_from_team_profile
+from services.event_detector import next_fixture_from_team_profile, is_winning_leg
 from services.odds_client import OddsClientError
 from services.poller import STATUS_LABELS
 from services.team_resolver import resolve_team, TeamNotFoundError, AmbiguousTeamError
@@ -88,7 +89,13 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
             # mid-bet, this accumulator should keep who was set when it
             # was set, not silently pick up the new roster.
             team["person"] = slot_roster[i] if i < len(slot_roster) else None
-            team["odds"], team["odds_bookmaker"] = await self._fetch_odds(team)
+
+        # Independent per-team lookups - run them concurrently rather than
+        # one at a time, so a 4-team accumulator isn't paying for 4
+        # sequential network round-trips before it can respond.
+        odds_results = await asyncio.gather(*(self._fetch_odds(team) for team in resolved))
+        for team, (odds, bookmaker) in zip(resolved, odds_results):
+            team["odds"], team["odds_bookmaker"] = odds, bookmaker
 
         accumulators = await storage.read_json(ACCUMULATORS_FILE, DEFAULT_ACCUMULATORS)
         accumulators[slot] = {
@@ -122,14 +129,23 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
             return f"<@{discord_user_id}>"
         return person_name
 
+    async def _fetch_fixture(self, team: dict):
+        try:
+            profile = await self.espn_client.get_team(team["league"], team["espn_id"])
+        except EspnClientError:
+            return None
+        return next_fixture_from_team_profile(profile, team["name"])
+
     async def _team_summary_lines(self, teams: list[dict]) -> list[str]:
         """For each resolved team: who it's assigned to, its odds, and its
         next fixture from ESPN (Discord timestamp markup so it renders in
         each viewer's own timezone).
         """
         people = await people_store.load_people()
+        fixtures = await asyncio.gather(*(self._fetch_fixture(team) for team in teams))
+
         lines = []
-        for team in teams:
+        for team, fixture in zip(teams, fixtures):
             person_label = self._person_label(people, team.get("person"))
 
             if team.get("odds"):
@@ -138,12 +154,6 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
                     odds_part += f" ({team['odds_bookmaker']})"
             else:
                 odds_part = "odds unavailable"
-
-            try:
-                profile = await self.espn_client.get_team(team["league"], team["espn_id"])
-                fixture = next_fixture_from_team_profile(profile, team["name"])
-            except EspnClientError:
-                fixture = None
 
             if fixture is None:
                 lines.append(f"- **{person_label}** — {team['name']}: no upcoming fixture found, {odds_part}")
@@ -292,9 +302,16 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
 
         def _result_for(team_name: str):
             for entry in match_state.values():
-                if entry.get("home") == team_name or entry.get("away") == team_name:
-                    opponent = entry["away"] if entry["home"] == team_name else entry["home"]
-                    return {"opponent": opponent, "score": entry.get("score"), "status": entry.get("status")}
+                home, away = entry.get("home"), entry.get("away")
+                if team_name not in (home, away):
+                    continue
+                opponent = away if home == team_name else home
+                return {
+                    "opponent": opponent,
+                    "score": entry.get("score"),
+                    "status": entry.get("status"),
+                    "is_home": home == team_name,
+                }
             return None
 
         archived_slots = {}
@@ -314,7 +331,7 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
         )
         await storage.write_json(STANDINGS_FILE, history)
 
-        await self._archive_people_history(accumulators, match_state, archived_at)
+        await self._archive_people_history(accumulators, _result_for, archived_at)
 
         await storage.write_json(ACCUMULATORS_FILE, DEFAULT_ACCUMULATORS)
         await storage.write_json(MATCH_STATE_FILE, {})
@@ -326,45 +343,33 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
         )
 
     @staticmethod
-    def _leg_outcome(team_name: str, locked_win: bool, match_state: dict) -> dict:
-        """Figure out what to record for one team's leg against
-        match_state.json at newbet time. Mirrors the win/loss rules the
-        poller already uses for the live status display: a draw counts as
-        a loss, and a locked-in early-payout lead counts as a win
-        regardless of the final score. If the match never reached full
-        time (postponed, no data seen, bot downtime, etc.), the raw
-        status is recorded instead of guessing a result.
+    def _leg_result(result: dict | None, locked_win: bool) -> str:
+        """Win/loss (or the raw match status if it never finished) for one
+        leg, given the {opponent, score, status, is_home} dict `_result_for`
+        already resolved for it. Uses the same is_winning_leg rule the
+        poller's live status display uses (a draw counts as a loss, an
+        early-payout lock counts as a win regardless of the final score),
+        so the two can't drift apart.
         """
-        for entry in match_state.values():
-            home, away = entry.get("home"), entry.get("away")
-            if team_name not in (home, away):
-                continue
+        if result is None:
+            return "no_data"
+        if result["status"] != "STATUS_FULL_TIME":
+            return result["status"]
 
-            opponent = away if home == team_name else home
-            score = entry.get("score")
-            status = entry.get("status", "no_data")
+        try:
+            left, right = (int(x) for x in result["score"].split("-"))
+        except (AttributeError, ValueError, KeyError):
+            return "unknown"
 
-            if status != "STATUS_FULL_TIME":
-                return {"opponent": opponent, "score": score, "result": status}
+        team_score, opp_score = (left, right) if result["is_home"] else (right, left)
+        return "win" if is_winning_leg(team_score, opp_score, locked_win) else "loss"
 
-            if locked_win:
-                return {"opponent": opponent, "score": score, "result": "win"}
-
-            try:
-                home_score, away_score = (int(x) for x in score.split("-"))
-            except (AttributeError, ValueError):
-                return {"opponent": opponent, "score": score, "result": "unknown"}
-
-            team_score = home_score if home == team_name else away_score
-            opp_score = away_score if home == team_name else home_score
-            return {"opponent": opponent, "score": score, "result": "win" if team_score > opp_score else "loss"}
-
-        return {"opponent": None, "score": None, "result": "no_data"}
-
-    async def _archive_people_history(self, accumulators: dict, match_state: dict, archived_at: str):
-        """Record each named team's leg into data/people.json. Teams with
-        no name assigned (roster wasn't set when /acc set ran) are skipped
-        - there's nobody to attribute them to.
+    async def _archive_people_history(self, accumulators: dict, result_for, archived_at: str):
+        """Record each named team's leg into data/people.json, reusing the
+        same {opponent, score, status} lookup `newbet` already ran against
+        match_state.json for the standings.json archive. Teams with no
+        name assigned (roster wasn't set when /acc set ran) are skipped -
+        there's nobody to attribute them to.
         """
         people = await people_store.load_people()
         changed = False
@@ -375,7 +380,7 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
                 if not person_name:
                     continue
 
-                outcome = self._leg_outcome(team["name"], team.get("locked_win", False), match_state)
+                result = result_for(team["name"])
                 key = people_store.find_person_key(people, person_name)
                 entry = people.setdefault(key, people_store.new_person_entry())
                 entry["history"].append(
@@ -383,9 +388,9 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
                         "archived_at": archived_at,
                         "slot": slot,
                         "team": team["name"],
-                        "opponent": outcome["opponent"],
-                        "score": outcome["score"],
-                        "result": outcome["result"],
+                        "opponent": result["opponent"] if result else None,
+                        "score": result["score"] if result else None,
+                        "result": self._leg_result(result, team.get("locked_win", False)),
                         "odds": team.get("odds"),
                     }
                 )

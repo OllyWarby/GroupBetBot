@@ -39,6 +39,7 @@ from services.event_detector import (
     snapshot_from_scoreboard_event,
     diff_snapshots,
     extract_new_card_events,
+    is_winning_leg,
     team_with_early_payout_lead,
 )
 import storage
@@ -51,6 +52,8 @@ STATUS_LABELS = {
     "STATUS_SECOND_HALF": "LIVE",
     "STATUS_HALFTIME": "HT",
     "STATUS_FULL_TIME": "FT",
+    "STATUS_POSTPONED": "postponed",
+    "STATUS_CANCELED": "cancelled",
 }
 
 # Statuses where the match clock is actually ticking (not half-time, not a
@@ -197,7 +200,7 @@ class Poller:
                 label = f"{label}, early payout"
             else:
                 # A draw counts as a loss for accumulator purposes.
-                result_icon = "✅" if team_score > opp_score else "❌"
+                result_icon = "✅" if is_winning_leg(team_score, opp_score, False) else "❌"
             lines.append(
                 f"{result_icon} {name} {team_score}-{opp_score} {opponent} ({label})"
             )
