@@ -6,3 +6,4 @@ __pycache__/
 # Runtime state - regenerated automatically by storage.py, and contains
 # live data (Discord channel IDs, current picks) that shouldn't be public.
 data/
+data_test/

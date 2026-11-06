@@ -4,8 +4,9 @@ import logging
 import discord
 from discord.ext import commands
 
-from config import DISCORD_TOKEN, DEV_GUILD_ID
+from config import DISCORD_TOKEN, DEV_GUILD_ID, TEST_MODE, DATA_DIR
 from services.espn_client import EspnClient
+from services.fake_espn_client import FakeEspnClient
 from services.poller import Poller
 import cogs.commands as commands_cog
 
@@ -16,13 +17,19 @@ logger = logging.getLogger(__name__)
 intents = discord.Intents.default()
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-espn_client = EspnClient()
+espn_client = FakeEspnClient() if TEST_MODE else EspnClient()
 poller = Poller(bot, espn_client)
 
 
 @bot.event
 async def on_ready():
     logger.info("Logged in as %s (%s)", bot.user, bot.user.id)
+
+    if TEST_MODE:
+        logger.warning(
+            "TEST MODE is ON - using simulated match data, no real ESPN calls will be made (data dir: %s)",
+            DATA_DIR,
+        )
 
     if DEV_GUILD_ID:
         guild = discord.Object(id=int(DEV_GUILD_ID))

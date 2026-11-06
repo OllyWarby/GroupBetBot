@@ -1,7 +1,8 @@
 # Discord Football Accumulator Bot
 
-Tracks two 4-team football accumulators (EPL / Championship / League One / League Two)
-and posts live updates (goals, half-time, full-time, red cards) to a Discord channel.
+Tracks two 4-team football accumulators (EPL / Championship / League One / League Two /
+National League) and posts live updates (goals, half-time, full-time, red cards) to a
+Discord channel.
 
 Data source: ESPN's public (unofficial) site API — free, no API key required.
 See `services/espn_client.py` for details and caveats.
@@ -33,6 +34,22 @@ See `services/espn_client.py` for details and caveats.
    ```
 
 4. In Discord, run `/acc setchannel` in the channel you want live updates posted to.
+
+## Test mode
+
+Set `TEST_MODE=true` in `.env` (see `.env.example`) to try out the whole live-update
+pipeline without waiting for a real fixture or touching real ESPN data:
+
+- The bot uses a fake ESPN client and a fixed roster of made-up teams (`Test Alpha`,
+  `Test Beta`, ... `Test Hotel`) instead of the real API — no network calls are made.
+- All data (accumulators, match state, standings, the update channel) is stored under
+  `data_test/` instead of `data/`, so real accumulators/history are never touched. You'll
+  need to run `/acc setchannel` once while in test mode, same as normal.
+- As soon as you fill a slot with 4 test teams (e.g. `/acc set 1 Test Alpha, Test Beta,
+  Test Gamma, Test Delta`), a scripted match plays out over the following ~90 seconds:
+  kick-off, a goal, half-time, a second goal (triggering an early-payout lock), and
+  full-time — posted to your update channel exactly like a real match would be.
+- Turn it back off (`TEST_MODE=false`) and restart to return to real ESPN data.
 
 ## Commands
 
