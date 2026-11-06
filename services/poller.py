@@ -1,27 +1,3 @@
-"""Background task: figures out which fixtures involve our tracked teams,
-polls their scores on a schedule that ramps up as kickoff approaches, and
-posts events + an accumulator status summary to the configured Discord
-channel when something changes.
-
-Events are grouped by accumulator slot and posted as one embed per affected
-slot, rather than one message per match - so if two of an accumulator's
-matches change in the same tick, that accumulator gets a single message
-(not two, with its status block duplicated across both).
-
-Scheduling behaviour:
-- Far out from any known kickoff: sleeps in FAR_OUT_POLL_INTERVAL chunks,
-  but actually computes the exact wake-up time for PRE_MATCH_WINDOW_SECONDS
-  before the next kickoff rather than blindly polling on a fixed cadence.
-- Inside the pre-match window: polls every PRE_MATCH_POLL_INTERVAL seconds,
-  fast enough to catch kickoff (and an early goal) within seconds.
-- Once any tracked match is live: polls every LIVE_POLL_INTERVAL seconds.
-
-Request volume stays low throughout because each poll is one scoreboard
-call per LEAGUE in play, not per team. The heavier `summary` (incidents)
-endpoint is only called for a specific match when a score/status change
-was just detected on it.
-"""
-
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -61,18 +37,8 @@ STATUS_LABELS = {
     "STATUS_CANCELED": "cancelled",
 }
 
-# Statuses where the match clock is actually ticking (not half-time, not a
-# stoppage) - used to decide whether to show "LIVE <clock>" instead of a
-# plain phase label.
 IN_PLAY_STATUSES = {"STATUS_FIRST_HALF", "STATUS_SECOND_HALF"}
 
-# Statuses where a tracked match has started but isn't finished, including
-# breaks in play like half-time. Used (alongside `state == "in"`) to decide
-# whether polling should stay on the fast live cadence - ESPN's generic
-# `state` bucket isn't reliably "in" while the clock is stopped at
-# half-time, so without this a match could fall back to the slow far-out
-# poll interval right when it goes to the break and fail to pick the
-# second half back up promptly.
 LIVE_OR_PAUSED_STATUSES = IN_PLAY_STATUSES | {"STATUS_HALFTIME"}
 
 
@@ -81,9 +47,6 @@ def _team_name(entry) -> str:
 
 
 def _embed_color(events: list[str]) -> discord.Color:
-    """Pick one color for a slot's embed from the events it contains, most
-    notable first - a goal outranks a plain kickoff, etc.
-    """
     joined = " ".join(events)
     if "⚽" in joined:  # goal
         return discord.Color.green()
@@ -116,26 +79,9 @@ class Poller:
             self._task.cancel()
 
     def clear_snapshots(self):
-        """Drop all in-memory match snapshots. Call this after archiving a
-        bet so a stale finished-match snapshot can't be shown against a
-        same-named team's next fixture before the next real poll refreshes it.
-        """
         self._snapshots.clear()
 
     async def _load_state_from_disk(self):
-        """Restore last-known match snapshots from match_state.json so a
-        restart doesn't lose the diffing baseline.
-
-        Trade-offs to know about: this restores score/status so a genuine
-        change that happened while the bot was down still gets detected
-        and posted on the next tick - but it collapses whatever happened
-        during the downtime into a single diff (e.g. 0-0 -> 2-1 while
-        offline is posted as one "goal" update showing the final score,
-        not two separate goals). It also doesn't restore which red cards
-        were already announced, so a card from just before a restart could
-        in rare cases be announced twice. Neither matters for the common
-        case of "bot was already running before and during kickoff."
-        """
         state_dump = await storage.read_json(MATCH_STATE_FILE, {})
         restored = 0
         for event_id, entry in state_dump.items():
@@ -206,8 +152,6 @@ class Poller:
                 lines.append(f"⏳ {name}: not started")
                 continue
 
-            # Show the tracked team's own score first (not always the home
-            # score) so an away team's line doesn't read backwards.
             is_home = snapshot.home_name == name
             team_score = snapshot.home_score if is_home else snapshot.away_score
             opp_score = snapshot.away_score if is_home else snapshot.home_score
@@ -218,9 +162,6 @@ class Poller:
                 label = f"LIVE {snapshot.display_clock}"
 
             if locked:
-                # 2+ goals clear (at any point) auto-settles this leg as a
-                # win with our provider - it stays a win even if the team
-                # concedes and the score above later says otherwise.
                 result_icon = "\U0001F512✅"
                 label = f"{label}, early payout"
             else:
@@ -232,14 +173,6 @@ class Poller:
         return "\n".join(lines)
 
     async def _lock_in_early_payouts(self, snapshot: MatchSnapshot) -> list[str]:
-        """If either side of this match now has an early-payout-qualifying
-        lead, mark that team's accumulator leg(s) as a locked-in win in
-        ACCUMULATORS_FILE - our bet provider auto-settles a leg as a winner
-        once a team goes 2 goals clear, and it stays a winner even if that
-        team later draws or loses. The lock is sticky (checked via
-        `locked_win`) so this only fires once per team, and cheap to call
-        repeatedly since it no-ops when nothing currently qualifies.
-        """
         lead = team_with_early_payout_lead(snapshot)
         if lead is None:
             return []
@@ -266,11 +199,6 @@ class Poller:
     async def _post_accumulator_updates(
         self, channel: discord.abc.Messageable | None, events_this_tick: list[tuple]
     ):
-        """Group this tick's match events by accumulator slot and send one
-        embed per slot that had a change - so two matches changing in the
-        same tick for the same accumulator produce a single message with
-        its status shown once, not once per match.
-        """
         if channel is None:
             logger.info("Event(s) detected but no update channel set: %s", events_this_tick)
             return
@@ -301,10 +229,54 @@ class Poller:
             except Exception:
                 logger.exception("Failed to post update for accumulator %s", slot)
 
+    async def _post_halftime_updates(
+        self, channel: discord.abc.Messageable | None, halftime_matches: list[MatchSnapshot]
+    ):
+        if channel is None:
+            logger.info("Half-time(s) detected but no update channel set: %s", halftime_matches)
+            return
+
+        for snapshot in halftime_matches:
+            line = (
+                f"\U0001F3C1 HT {snapshot.home_name} {snapshot.home_score}-"
+                f"{snapshot.away_score} {snapshot.away_name}"
+            )
+            try:
+                await channel.send(line)
+            except Exception:
+                logger.exception("Failed to post half-time line for %s", snapshot.event_id)
+
+        accumulators = await storage.read_json(ACCUMULATORS_FILE, {})
+        for slot, acc in accumulators.items():
+            team_names = [_team_name(t) for t in acc.get("teams", [])]
+            if not team_names:
+                continue
+
+            just_arrived = any(
+                s.home_name in team_names or s.away_name in team_names for s in halftime_matches
+            )
+            if not just_arrived:
+                continue
+
+            all_at_halftime = all(
+                (snap := self._find_snapshot_by_team(name)) is not None
+                and snap.status == "STATUS_HALFTIME"
+                for name in team_names
+            )
+            if not all_at_halftime:
+                continue
+
+            embed = discord.Embed(
+                title=f"\U0001F4CA Accumulator {slot} halftime update",
+                description=self._format_accumulator_status(acc),
+                color=discord.Color.light_grey(),
+            )
+            try:
+                await channel.send(embed=embed)
+            except Exception:
+                logger.exception("Failed to post half-time update for accumulator %s", slot)
+
     async def _tick(self) -> float:
-        """Poll everything relevant once. Returns how many seconds to sleep
-        before the next tick.
-        """
         tracked_names = await self._tracked_team_names()
         if not tracked_names:
             return FAR_OUT_POLL_INTERVAL
@@ -314,8 +286,9 @@ class Poller:
         today_str = now.strftime("%Y%m%d")
 
         state_dump = {}
-        this_tick_matches = []  # snapshots for tracked teams found this tick
-        events_this_tick: list[tuple] = []  # (snapshot, text_events) with something to post
+        this_tick_matches = []
+        events_this_tick: list[tuple] = []
+        halftime_matches: list[MatchSnapshot] = []  # matches that just reached half-time
 
         for slug in LEAGUE_SLUGS.values():
             try:
@@ -336,14 +309,13 @@ class Poller:
                     snapshot.seen_incident_ids = old.seen_incident_ids  # carry over card dedup
 
                 text_events = diff_snapshots(old, snapshot)
+                if (
+                    old is not None
+                    and old.status != "STATUS_HALFTIME"
+                    and snapshot.status == "STATUS_HALFTIME"
+                ):
+                    halftime_matches.append(snapshot)
 
-                # Persist the new baseline *before* the best-effort enrichment
-                # below. If fetching/parsing the summary feed ever throws
-                # (bad shape, unexpected incident, etc.) it must not leave us
-                # diffing against a stale pre-halftime snapshot on every
-                # future tick - that would silently swallow every later
-                # goal/status change for this match, including the restart,
-                # for the rest of the game.
                 self._snapshots[snapshot.event_id] = snapshot
                 this_tick_matches.append(snapshot)
                 state_dump[snapshot.event_id] = {
@@ -355,9 +327,6 @@ class Poller:
                 }
 
                 if old is None or text_events:
-                    # Check on every score change, and also on first sighting
-                    # so a team that's already 2+ clear when the bot starts
-                    # watching (e.g. after a restart) still gets locked in.
                     try:
                         text_events.extend(await self._lock_in_early_payouts(snapshot))
                     except Exception:
@@ -366,9 +335,6 @@ class Poller:
                         )
 
                 if text_events and snapshot.state == "in":
-                    # Best-effort only (who scored / red cards) - never let a
-                    # bad or unexpected shape in this feed stop the core
-                    # score/status update above from being posted.
                     try:
                         summary = await self.client.get_summary(slug, snapshot.event_id)
                         text_events.extend(extract_new_card_events(summary, snapshot))
@@ -386,6 +352,9 @@ class Poller:
 
         if events_this_tick:
             await self._post_accumulator_updates(channel, events_this_tick)
+
+        if halftime_matches:
+            await self._post_halftime_updates(channel, halftime_matches)
 
         any_live = any(
             s.state == "in" or s.status in LIVE_OR_PAUSED_STATUSES for s in this_tick_matches
