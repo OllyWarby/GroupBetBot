@@ -24,9 +24,9 @@ class PersonCommands(commands.GroupCog, name="person"):
         self.bot = bot
         super().__init__()
 
-    @app_commands.command(description="Link a name (as used in /acc setnames) to a Discord member")
+    @app_commands.command(description="Link an accumulator name (from config.py) to a Discord member")
     @app_commands.describe(
-        name="The name as it appears in /acc setnames",
+        name="The name as it appears in ACC_NAMES in config.py",
         user="The Discord member this name belongs to",
     )
     async def link(self, interaction: discord.Interaction, name: str, user: discord.Member):
@@ -42,7 +42,7 @@ class PersonCommands(commands.GroupCog, name="person"):
 
     @app_commands.command(description="Show a person's long-term win/loss history")
     @app_commands.describe(
-        name="The name as it appears in /acc setnames",
+        name="The name as it appears in ACC_NAMES in config.py",
         count="How many recent entries to show (default 10)",
     )
     async def history(self, interaction: discord.Interaction, name: str, count: int = 10):

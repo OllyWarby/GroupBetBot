@@ -47,6 +47,12 @@ def _team_name(entry) -> str:
     return entry["name"] if isinstance(entry, dict) else entry
 
 
+def _team_label(entry) -> str:
+    name = _team_name(entry)
+    person = entry.get("person") if isinstance(entry, dict) else None
+    return f"{person} · {name}" if person else name
+
+
 def _embed_color(events: list[str]) -> discord.Color:
     joined = " ".join(events)
     if "⚽" in joined:  # goal
@@ -70,6 +76,7 @@ class Poller:
         self.client = client
         self._snapshots: dict[str, object] = {}  # event_id -> MatchSnapshot
         self._task: asyncio.Task | None = None
+        self.on_all_finished = None  # optional async callback, run once every tracked match is at full-time
 
     def start(self):
         if self._task is None or self._task.done():
@@ -140,18 +147,19 @@ class Poller:
         lines = []
         for team in acc.get("teams", []):
             name = _team_name(team)
+            label_name = _team_label(team)
             locked = isinstance(team, dict) and team.get("locked_win")
             snapshot = self._find_snapshot_by_team(name)
 
             if snapshot is None:
                 if locked:
-                    lines.append(f"\U0001F512 {name} {team.get('locked_score', '')}: early payout")
+                    lines.append(f"\U0001F512 {label_name} {team.get('locked_score', '')}: early payout")
                 else:
-                    lines.append(f"❔ {name}: no data")
+                    lines.append(f"❔ {label_name}: no data")
                 continue
 
             if snapshot.status == "STATUS_SCHEDULED":
-                lines.append(f"⏳ {name}: not started")
+                lines.append(f"⏳ {label_name}: not started")
                 continue
 
             is_home = snapshot.home_name == name
@@ -170,7 +178,7 @@ class Poller:
                 # A draw counts as a loss for accumulator purposes.
                 result_icon = "✅" if is_winning_leg(team_score, opp_score, False) else "❌"
             lines.append(
-                f"{result_icon} {name} {team_score}-{opp_score} {opponent} ({label})"
+                f"{result_icon} {label_name} {team_score}-{opp_score} {opponent} ({label})"
             )
         return "\n".join(lines)
 
@@ -419,6 +427,18 @@ class Poller:
 
         if halftime_matches:
             await self._post_halftime_updates(channel, halftime_matches)
+
+        if (
+            self.on_all_finished
+            and this_tick_matches
+            and all(s.status == "STATUS_FULL_TIME" for s in this_tick_matches)
+        ):
+            try:
+                await self.on_all_finished()
+                if channel is not None:
+                    await channel.send("\U0001F9F9 Bet archived and cleared")
+            except Exception:
+                logger.exception("Failed to clear bet after all matches finished")
 
         any_live = any(
             s.state == "in" or s.status in LIVE_OR_PAUSED_STATUSES for s in this_tick_matches

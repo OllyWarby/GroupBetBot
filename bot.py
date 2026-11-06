@@ -4,13 +4,14 @@ import logging
 import discord
 from discord.ext import commands
 
-from config import DISCORD_TOKEN, DEV_GUILD_ID, TEST_MODE, DATA_DIR
+from config import DISCORD_TOKEN, DEV_GUILD_ID, TEST_MODE, DATA_DIR, ACCUMULATORS_FILE, MATCH_STATE_FILE
 from services.espn_client import EspnClient
 from services.fake_espn_client import FakeEspnClient
 from services.odds_client import OddsClient
 from services.poller import Poller
 import cogs.commands as commands_cog
 import cogs.person as person_cog
+import storage
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -53,6 +54,16 @@ async def main():
     async with bot:
         await commands_cog.setup(bot, espn_client, poller, odds_client)
         await person_cog.setup(bot)
+        if TEST_MODE:
+            await storage.write_json(ACCUMULATORS_FILE, commands_cog.DEFAULT_ACCUMULATORS)
+            await storage.write_json(MATCH_STATE_FILE, {})
+            acc_cog = bot.get_cog("acc")
+
+            async def clear_finished_test_bet():
+                await acc_cog.archive_and_reset()
+                espn_client.reset()
+
+            poller.on_all_finished = clear_finished_test_bet
         try:
             await bot.start(DISCORD_TOKEN)
         finally:

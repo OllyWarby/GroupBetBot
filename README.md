@@ -20,13 +20,11 @@ Optional: set `ODDS_ENABLED=true` and `ODDS_API_KEY` (free key from [the-odds-ap
 
 Set `TEST_MODE=true` to run against a fake ESPN client with made-up teams (`Test Alpha` ... `Test Hotel`). Data goes to `data_test/` and updates go to `#test-channel`, so create that channel too.
 
-Fill a slot with four test teams (`/acc set 1 Test Alpha, Test Beta, Test Gamma, Test Delta`) and a ~90s scripted match plays out: kick-off, goal, half-time, goal, full-time.
+Fill a slot with four test teams (`/acc set 1`, then enter Test Alpha, Test Beta, Test Gamma and Test Delta in the boxes) and a ~75s scripted match plays out: kick-off, goals, half-time, a red card, an early-payout lock that is then undone by a disallowed goal, and full-time. The bet is then archived and cleared automatically, so you can `/acc set` again straight away.
 
 ## Commands
 
-- `/acc set slot teams` - set a slot's 4 teams (comma-separated); posts kick-off times, names and odds
-- `/acc setnames slot names` - set the 4 names that go with a slot's teams, in order
-- `/acc names slot` - show a slot's names
+- `/acc set slot` - opens a form with one box per name from `ACC_NAMES` in `config.py` (e.g. Liv, Cal, Dave, Matt); enter each person's team and it posts kick-off times, names and odds
 - `/acc check slot` - check each team resolves against ESPN (run before matchday)
 - `/acc show` - show current teams and next kick-offs
 - `/acc clear slot` - clear a slot

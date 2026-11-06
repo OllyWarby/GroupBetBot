@@ -39,11 +39,16 @@ ACCUMULATORS_FILE = os.path.join(DATA_DIR, "accumulators.json")
 TEAM_CACHE_FILE = os.path.join(DATA_DIR, "team_cache.json")
 MATCH_STATE_FILE = os.path.join(DATA_DIR, "match_state.json")
 STANDINGS_FILE = os.path.join(DATA_DIR, "standings.json")
-ROSTER_FILE = os.path.join(DATA_DIR, "roster.json")
 PEOPLE_FILE = os.path.join(DATA_DIR, "people.json")
 
 ACC_SLOTS = ("1", "2")
 TEAMS_PER_ACC = 4
+
+# Each name becomes a labelled box in the /acc set form, and is stored against that box's team.
+ACC_NAMES = {
+    "1": ("Liv", "Cal", "Dave", "Matt"),
+    "2": ("Olly", "Joe", "Luke", "Niamh"),
+}
 
 ODDS_ENABLED = os.getenv("ODDS_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")

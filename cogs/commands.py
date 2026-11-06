@@ -9,8 +9,8 @@ from config import (
     ACCUMULATORS_FILE,
     MATCH_STATE_FILE,
     STANDINGS_FILE,
-    ROSTER_FILE,
     ACC_SLOTS,
+    ACC_NAMES,
     TEAMS_PER_ACC,
 )
 from services.espn_client import EspnClientError
@@ -26,10 +26,22 @@ DEFAULT_ACCUMULATORS = {
     "2": {"teams": [], "created_at": None},
 }
 
-DEFAULT_ROSTER = {
-    "1": [],
-    "2": [],
-}
+
+class TeamsModal(discord.ui.Modal):
+    def __init__(self, cog: "AccumulatorCommands", slot: str):
+        super().__init__(title=f"Accumulator {slot} teams")
+        self.cog = cog
+        self.slot = slot
+        slot_names = ACC_NAMES.get(slot, ())
+        self.inputs = []
+        for i in range(TEAMS_PER_ACC):
+            label = slot_names[i] if i < len(slot_names) else f"Team {i + 1}"
+            box = discord.ui.TextInput(placeholder="e.g. Arsenal", max_length=60)
+            self.add_item(discord.ui.Label(text=label, component=box))
+            self.inputs.append(box)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.cog.set_slot(interaction, self.slot, [box.value.strip() for box in self.inputs])
 
 
 class AccumulatorCommands(commands.GroupCog, name="acc"):
@@ -41,21 +53,17 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
         super().__init__()
 
     @app_commands.command(description="Set the 4 teams for an accumulator slot")
-    @app_commands.describe(
-        slot="Which accumulator (1 or 2)",
-        teams="4 team names, comma-separated, e.g. Arsenal, Leeds, Bolton, Salford",
-    )
-    async def set(self, interaction: discord.Interaction, slot: str, teams: str):
+    @app_commands.describe(slot="Which accumulator (1 or 2)")
+    async def set(self, interaction: discord.Interaction, slot: str):
         if slot not in ACC_SLOTS:
             await interaction.response.send_message(f"Slot must be one of {ACC_SLOTS}.", ephemeral=True)
             return
 
-        team_names = [t.strip() for t in teams.split(",") if t.strip()]
-        if len(team_names) != TEAMS_PER_ACC:
-            await interaction.response.send_message(
-                f"Please provide exactly {TEAMS_PER_ACC} team names, got {len(team_names)}.",
-                ephemeral=True,
-            )
+        await interaction.response.send_modal(TeamsModal(self, slot))
+
+    async def set_slot(self, interaction: discord.Interaction, slot: str, team_names: list[str]):
+        if not all(team_names):
+            await interaction.response.send_message("Please fill in a team for every name.", ephemeral=True)
             return
 
         await interaction.response.defer(thinking=True)
@@ -80,10 +88,9 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
             )
             return
 
-        roster = await storage.read_json(ROSTER_FILE, DEFAULT_ROSTER)
-        slot_roster = roster.get(slot, [])
+        slot_names = ACC_NAMES.get(slot, ())
         for i, team in enumerate(resolved):
-            team["person"] = slot_roster[i] if i < len(slot_roster) else None
+            team["person"] = slot_names[i] if i < len(slot_names) else None
 
         odds_results = await asyncio.gather(*(self._fetch_odds(team) for team in resolved))
         for team, (odds, bookmaker) in zip(resolved, odds_results):
@@ -159,21 +166,22 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
     async def _kickoff_lines(self, teams: list[dict]) -> list[str]:
         lines = []
         for team in teams:
+            label = f"{team['person']} · {team['name']}" if team.get("person") else team["name"]
             try:
                 profile = await self.espn_client.get_team(team["league"], team["espn_id"])
             except EspnClientError:
-                lines.append(f"- {team['name']}: couldn't fetch fixture info right now")
+                lines.append(f"- {label}: couldn't fetch fixture info right now")
                 continue
 
             fixture = next_fixture_from_team_profile(profile, team["name"])
             if fixture is None:
-                lines.append(f"- {team['name']}: no upcoming fixture found")
+                lines.append(f"- {label}: no upcoming fixture found")
                 continue
 
             kickoff, opponent, is_home = fixture
             ts = int(kickoff.timestamp())
             vs_or_at = "vs" if is_home else "@"
-            lines.append(f"- {team['name']} {vs_or_at} {opponent}: <t:{ts}:F> (<t:{ts}:R>)")
+            lines.append(f"- {label} {vs_or_at} {opponent}: <t:{ts}:F> (<t:{ts}:R>)")
         return lines
 
     @app_commands.command(description="Check that 4 team names resolve, without saving them")
@@ -194,51 +202,6 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
                 lines.append(f"⚠️ **{name}**: ambiguous — {options}")
 
         await interaction.followup.send("\n".join(lines))
-
-    @app_commands.command(description="Set the 4 names to attribute a slot's teams to, in order")
-    @app_commands.describe(
-        slot="Which accumulator (1 or 2)",
-        names="4 names, comma-separated, in the same order teams are given to /acc set",
-    )
-    async def setnames(self, interaction: discord.Interaction, slot: str, names: str):
-        if slot not in ACC_SLOTS:
-            await interaction.response.send_message(f"Slot must be one of {ACC_SLOTS}.", ephemeral=True)
-            return
-
-        name_list = [n.strip() for n in names.split(",") if n.strip()]
-        if len(name_list) != TEAMS_PER_ACC:
-            await interaction.response.send_message(
-                f"Please provide exactly {TEAMS_PER_ACC} names, got {len(name_list)}.",
-                ephemeral=True,
-            )
-            return
-
-        roster = await storage.read_json(ROSTER_FILE, DEFAULT_ROSTER)
-        roster[slot] = name_list
-        await storage.write_json(ROSTER_FILE, roster)
-
-        await interaction.response.send_message(
-            f"Names for accumulator {slot} set: {', '.join(name_list)}\n"
-            "These stick around across `/acc newbet` — the next `/acc set` for this slot will "
-            "match team #1 to name #1, and so on."
-        )
-
-    @app_commands.command(description="Show the names currently set for an accumulator slot")
-    @app_commands.describe(slot="Which accumulator (1 or 2)")
-    async def names(self, interaction: discord.Interaction, slot: str):
-        if slot not in ACC_SLOTS:
-            await interaction.response.send_message(f"Slot must be one of {ACC_SLOTS}.", ephemeral=True)
-            return
-
-        roster = await storage.read_json(ROSTER_FILE, DEFAULT_ROSTER)
-        slot_roster = roster.get(slot, [])
-        if not slot_roster:
-            await interaction.response.send_message(
-                f"No names set for accumulator {slot} yet — use `/acc setnames`.", ephemeral=True
-            )
-            return
-
-        await interaction.response.send_message(f"Accumulator {slot} names: {', '.join(slot_roster)}")
 
     @app_commands.command(description="Clear an accumulator slot")
     @app_commands.describe(slot="Which accumulator (1 or 2)")
@@ -265,9 +228,8 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
                 blocks.append(f"**Accumulator {slot}**: (empty)")
                 continue
 
-            names = ", ".join(t["name"] for t in teams)
             fixture_lines = await self._kickoff_lines(teams)
-            blocks.append(f"**Accumulator {slot}**: {names}\n" + "\n".join(fixture_lines))
+            blocks.append(f"**Accumulator {slot}**\n" + "\n".join(fixture_lines))
 
         await interaction.followup.send("\n\n".join(blocks))
 
@@ -275,12 +237,21 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
         description="Archive this bet's results and reset both slots, ready for the next one"
     )
     async def newbet(self, interaction: discord.Interaction):
-        accumulators = await storage.read_json(ACCUMULATORS_FILE, DEFAULT_ACCUMULATORS)
-        if not any(acc.get("teams") for acc in accumulators.values()):
+        if not await self.archive_and_reset():
             await interaction.response.send_message(
                 "Nothing to archive — both slots are already empty.", ephemeral=True
             )
             return
+
+        await interaction.response.send_message(
+            "Archived this bet's results and cleared both slots — set up the next one with `/acc set` "
+            "whenever you're ready (works for a Saturday round or an adhoc midweek/cup bet alike)."
+        )
+
+    async def archive_and_reset(self) -> bool:
+        accumulators = await storage.read_json(ACCUMULATORS_FILE, DEFAULT_ACCUMULATORS)
+        if not any(acc.get("teams") for acc in accumulators.values()):
+            return False
 
         match_state = await storage.read_json(MATCH_STATE_FILE, {})
 
@@ -320,11 +291,7 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
         await storage.write_json(ACCUMULATORS_FILE, DEFAULT_ACCUMULATORS)
         await storage.write_json(MATCH_STATE_FILE, {})
         self.poller.clear_snapshots()
-
-        await interaction.response.send_message(
-            "Archived this bet's results and cleared both slots — set up the next one with `/acc set` "
-            "whenever you're ready (works for a Saturday round or an adhoc midweek/cup bet alike)."
-        )
+        return True
 
     @staticmethod
     def _leg_result(result: dict | None, locked_win: bool) -> str:
