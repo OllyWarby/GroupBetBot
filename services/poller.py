@@ -3,6 +3,11 @@ polls their scores on a schedule that ramps up as kickoff approaches, and
 posts events + an accumulator status summary to the configured Discord
 channel when something changes.
 
+Events are grouped by accumulator slot and posted as one embed per affected
+slot, rather than one message per match - so if two of an accumulator's
+matches change in the same tick, that accumulator gets a single message
+(not two, with its status block duplicated across both).
+
 Scheduling behaviour:
 - Far out from any known kickoff: sleeps in FAR_OUT_POLL_INTERVAL chunks,
   but actually computes the exact wake-up time for PRE_MATCH_WINDOW_SECONDS
@@ -73,6 +78,26 @@ LIVE_OR_PAUSED_STATUSES = IN_PLAY_STATUSES | {"STATUS_HALFTIME"}
 
 def _team_name(entry) -> str:
     return entry["name"] if isinstance(entry, dict) else entry
+
+
+def _embed_color(events: list[str]) -> discord.Color:
+    """Pick one color for a slot's embed from the events it contains, most
+    notable first - a goal outranks a plain kickoff, etc.
+    """
+    joined = " ".join(events)
+    if "⚽" in joined:  # goal
+        return discord.Color.green()
+    if "\U0001F512" in joined:  # early payout locked in
+        return discord.Color.gold()
+    if "\U0001F7E5" in joined:  # red card
+        return discord.Color.red()
+    if "\U0001F7E2" in joined:  # kick-off
+        return discord.Color.blue()
+    if "FT" in joined:  # full-time
+        return discord.Color.dark_grey()
+    if "HT" in joined:  # half-time
+        return discord.Color.light_grey()
+    return discord.Color.blurple()
 
 
 class Poller:
@@ -163,8 +188,8 @@ class Poller:
                 return snapshot
         return None
 
-    def _format_accumulator_status(self, slot: str, acc: dict) -> str:
-        lines = [f"\U0001F4CA **Acc {slot}**"]
+    def _format_accumulator_status(self, acc: dict) -> str:
+        lines = []
         for team in acc.get("teams", []):
             name = _team_name(team)
             locked = isinstance(team, dict) and team.get("locked_win")
@@ -238,14 +263,43 @@ class Poller:
         await storage.write_json(ACCUMULATORS_FILE, accumulators)
         return [f"\U0001F512 {team_name} {team_score}-{opp_score} {opponent} - early payout locked in!"]
 
-    async def _accumulators_for_team(self, team_name: str) -> list[tuple[str, dict]]:
+    async def _post_accumulator_updates(
+        self, channel: discord.abc.Messageable | None, events_this_tick: list[tuple]
+    ):
+        """Group this tick's match events by accumulator slot and send one
+        embed per slot that had a change - so two matches changing in the
+        same tick for the same accumulator produce a single message with
+        its status shown once, not once per match.
+        """
+        if channel is None:
+            logger.info("Event(s) detected but no update channel set: %s", events_this_tick)
+            return
+
         accumulators = await storage.read_json(ACCUMULATORS_FILE, {})
-        matches = []
         for slot, acc in accumulators.items():
-            names = {_team_name(t) for t in acc.get("teams", [])}
-            if team_name in names:
-                matches.append((slot, acc))
-        return matches
+            team_names = {_team_name(t) for t in acc.get("teams", [])}
+            if not team_names:
+                continue
+
+            slot_events = [
+                line
+                for snapshot, text_events in events_this_tick
+                for line in text_events
+                if snapshot.home_name in team_names or snapshot.away_name in team_names
+            ]
+            if not slot_events:
+                continue
+
+            embed = discord.Embed(
+                title=f"\U0001F4CA Accumulator {slot} update",
+                description="\n".join(slot_events),
+                color=_embed_color(slot_events),
+            )
+            embed.add_field(name="Status", value=self._format_accumulator_status(acc), inline=False)
+            try:
+                await channel.send(embed=embed)
+            except Exception:
+                logger.exception("Failed to post update for accumulator %s", slot)
 
     async def _tick(self) -> float:
         """Poll everything relevant once. Returns how many seconds to sleep
@@ -261,6 +315,7 @@ class Poller:
 
         state_dump = {}
         this_tick_matches = []  # snapshots for tracked teams found this tick
+        events_this_tick: list[tuple] = []  # (snapshot, text_events) with something to post
 
         for slug in LEAGUE_SLUGS.values():
             try:
@@ -325,24 +380,12 @@ class Poller:
                         )
 
                 if text_events:
-                    if channel is None:
-                        logger.info("Event(s) detected but no update channel set: %s", text_events)
-                    else:
-                        try:
-                            await channel.send("\n".join(text_events))
-                            # Follow-up: post the overall standing of any
-                            # accumulator this match's teams belong to.
-                            posted_slots = set()
-                            for team_name in (snapshot.home_name, snapshot.away_name):
-                                for slot, acc in await self._accumulators_for_team(team_name):
-                                    if slot in posted_slots:
-                                        continue
-                                    posted_slots.add(slot)
-                                    await channel.send(self._format_accumulator_status(slot, acc))
-                        except Exception:
-                            logger.exception("Failed to post update(s) for event %s", snapshot.event_id)
+                    events_this_tick.append((snapshot, text_events))
 
         await storage.write_json(MATCH_STATE_FILE, state_dump)
+
+        if events_this_tick:
+            await self._post_accumulator_updates(channel, events_this_tick)
 
         any_live = any(
             s.state == "in" or s.status in LIVE_OR_PAUSED_STATUSES for s in this_tick_matches
