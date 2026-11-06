@@ -21,10 +21,24 @@ HALFTIME_AT = 30
 SECOND_HALF_AT = 40
 FULL_TIME_AT = 70
 
-GOAL_SCHEDULES = [
-    [(15, "home"), (50, "home")],
-    [(25, "away")],
+# Score changes as (seconds after kick-off, side, delta); a negative delta is a disallowed goal.
+# Red cards are (seconds after kick-off, side, player).
+SCENARIOS = [
+    {
+        "goals": [(15, "home", 1), (50, "home", 1), (56, "home", -1)],
+        "red_cards": [],
+    },
+    {
+        "goals": [(25, "away", 1)],
+        "red_cards": [(47, "home", "Test Player")],
+    },
 ]
+
+
+def _clock(elapsed: float) -> str:
+    if elapsed < SECOND_HALF_AT:
+        return f"{int(elapsed)}'"
+    return f"{45 + int(elapsed - SECOND_HALF_AT)}'"
 
 
 class FakeEspnClient:
@@ -50,16 +64,18 @@ class FakeEspnClient:
         elif elapsed < SECOND_HALF_AT:
             status, state, clock = "STATUS_HALFTIME", "in", "HT"
         elif elapsed < FULL_TIME_AT:
-            status, state, clock = "STATUS_SECOND_HALF", "in", f"{45 + int(elapsed - SECOND_HALF_AT)}'"
+            status, state, clock = "STATUS_SECOND_HALF", "in", _clock(elapsed)
         else:
             status, state, clock = "STATUS_FULL_TIME", "post", "FT"
 
-        schedule = GOAL_SCHEDULES[pair_index % len(GOAL_SCHEDULES)]
-        home_score = sum(1 for t, side in schedule if side == "home" and elapsed >= t)
-        away_score = sum(1 for t, side in schedule if side == "away" and elapsed >= t)
+        goals = SCENARIOS[pair_index % len(SCENARIOS)]["goals"]
+        home_score = sum(delta for t, side, delta in goals if side == "home" and elapsed >= t)
+        away_score = sum(delta for t, side, delta in goals if side == "away" and elapsed >= t)
 
         return {
             "id": key,
+            "pair_index": pair_index,
+            "elapsed": elapsed,
             "home": home,
             "away": away,
             "home_score": home_score,
@@ -115,7 +131,27 @@ class FakeEspnClient:
         return {"events": [self._event_json(m) for m in matches]}
 
     async def get_summary(self, league_slug: str, event_id: str) -> dict:
-        return {"details": []}
+        match = next((m for m in await self._simulated_matches() if m["id"] == event_id), None)
+        if match is None:
+            return {"details": []}
+
+        red_cards = SCENARIOS[match["pair_index"] % len(SCENARIOS)]["red_cards"]
+        return {
+            "details": [
+                {
+                    "id": f"{event_id}:red:{i}",
+                    "type": {"text": "Red Card"},
+                    "athletesInvolved": [{"displayName": player}],
+                    "team": {"displayName": match[side]},
+                    "clock": {"displayValue": _clock(t)},
+                }
+                for i, (t, side, player) in enumerate(red_cards)
+                if match["elapsed"] >= t
+            ]
+        }
+
+    def reset(self):
+        self._kickoffs.clear()
 
     async def get_teams(self, league_slug: str) -> dict:
         return {
