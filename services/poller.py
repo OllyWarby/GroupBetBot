@@ -301,6 +301,58 @@ class Poller:
             except Exception:
                 logger.exception("Failed to post update for accumulator %s", slot)
 
+    async def _post_halftime_updates(
+        self, channel: discord.abc.Messageable | None, halftime_matches: list[MatchSnapshot]
+    ):
+        """Half-time is noisy with a full status block per match, so each
+        match reaching the break gets a one-line message, and an accumulator
+        only gets its full "halftime update" once every one of its teams is
+        at half-time (i.e. when the last leg arrives).
+        """
+        if channel is None:
+            logger.info("Half-time(s) detected but no update channel set: %s", halftime_matches)
+            return
+
+        for snapshot in halftime_matches:
+            line = (
+                f"\U0001F3C1 HT {snapshot.home_name} {snapshot.home_score}-"
+                f"{snapshot.away_score} {snapshot.away_name}"
+            )
+            try:
+                await channel.send(line)
+            except Exception:
+                logger.exception("Failed to post half-time line for %s", snapshot.event_id)
+
+        accumulators = await storage.read_json(ACCUMULATORS_FILE, {})
+        for slot, acc in accumulators.items():
+            team_names = [_team_name(t) for t in acc.get("teams", [])]
+            if not team_names:
+                continue
+
+            just_arrived = any(
+                s.home_name in team_names or s.away_name in team_names for s in halftime_matches
+            )
+            if not just_arrived:
+                continue
+
+            all_at_halftime = all(
+                (snap := self._find_snapshot_by_team(name)) is not None
+                and snap.status == "STATUS_HALFTIME"
+                for name in team_names
+            )
+            if not all_at_halftime:
+                continue
+
+            embed = discord.Embed(
+                title=f"\U0001F4CA Accumulator {slot} halftime update",
+                description=self._format_accumulator_status(acc),
+                color=discord.Color.light_grey(),
+            )
+            try:
+                await channel.send(embed=embed)
+            except Exception:
+                logger.exception("Failed to post half-time update for accumulator %s", slot)
+
     async def _tick(self) -> float:
         """Poll everything relevant once. Returns how many seconds to sleep
         before the next tick.
@@ -316,6 +368,7 @@ class Poller:
         state_dump = {}
         this_tick_matches = []  # snapshots for tracked teams found this tick
         events_this_tick: list[tuple] = []  # (snapshot, text_events) with something to post
+        halftime_matches: list[MatchSnapshot] = []  # matches that just reached half-time
 
         for slug in LEAGUE_SLUGS.values():
             try:
@@ -336,6 +389,12 @@ class Poller:
                     snapshot.seen_incident_ids = old.seen_incident_ids  # carry over card dedup
 
                 text_events = diff_snapshots(old, snapshot)
+                if (
+                    old is not None
+                    and old.status != "STATUS_HALFTIME"
+                    and snapshot.status == "STATUS_HALFTIME"
+                ):
+                    halftime_matches.append(snapshot)
 
                 # Persist the new baseline *before* the best-effort enrichment
                 # below. If fetching/parsing the summary feed ever throws
@@ -386,6 +445,9 @@ class Poller:
 
         if events_this_tick:
             await self._post_accumulator_updates(channel, events_this_tick)
+
+        if halftime_matches:
+            await self._post_halftime_updates(channel, halftime_matches)
 
         any_live = any(
             s.state == "in" or s.status in LIVE_OR_PAUSED_STATUSES for s in this_tick_matches

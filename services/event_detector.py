@@ -142,11 +142,10 @@ def diff_snapshots(old: MatchSnapshot | None, new: MatchSnapshot) -> list[str]:
         )
 
     if new.status != old.status:
-        if new.status == "STATUS_HALFTIME":
-            events.append(
-                f"\U0001F3C1 HT {new.home_name} {new.home_score}-{new.away_score} {new.away_name}"
-            )
-        elif new.status == "STATUS_FULL_TIME":
+        # Half-time is deliberately not reported here - the poller posts it
+        # as a one-line update plus a combined summary once every leg of an
+        # accumulator is at the break.
+        if new.status == "STATUS_FULL_TIME":
             events.append(
                 f"\U0001F3C1 FT {new.home_name} {new.home_score}-{new.away_score} {new.away_name}"
             )
