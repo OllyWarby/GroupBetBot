@@ -52,11 +52,14 @@ else:
     # next known kickoff rather than blindly polling on this cadence.
     FAR_OUT_POLL_INTERVAL = 600
 
+# Live updates are posted to the text channel with this name (looked up in
+# every guild the bot is in), so there's nothing to configure at startup.
+UPDATE_CHANNEL_NAME = "test-channel" if TEST_MODE else "live-updates"
+
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data_test" if TEST_MODE else "data")
 ACCUMULATORS_FILE = os.path.join(DATA_DIR, "accumulators.json")
 TEAM_CACHE_FILE = os.path.join(DATA_DIR, "team_cache.json")
 MATCH_STATE_FILE = os.path.join(DATA_DIR, "match_state.json")
-CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 STANDINGS_FILE = os.path.join(DATA_DIR, "standings.json")
 ROSTER_FILE = os.path.join(DATA_DIR, "roster.json")
 PEOPLE_FILE = os.path.join(DATA_DIR, "people.json")

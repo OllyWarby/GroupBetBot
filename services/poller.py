@@ -32,7 +32,7 @@ from config import (
     LEAGUE_SLUGS,
     ACCUMULATORS_FILE,
     MATCH_STATE_FILE,
-    CONFIG_FILE,
+    UPDATE_CHANNEL_NAME,
     LIVE_POLL_INTERVAL,
     PRE_MATCH_WINDOW_SECONDS,
     PRE_MATCH_POLL_INTERVAL,
@@ -176,11 +176,11 @@ class Poller:
         return names
 
     async def _get_channel(self) -> discord.abc.Messageable | None:
-        cfg = await storage.read_json(CONFIG_FILE, {})
-        channel_id = cfg.get("update_channel_id")
-        if not channel_id:
-            return None
-        return self.bot.get_channel(int(channel_id))
+        for guild in self.bot.guilds:
+            channel = discord.utils.get(guild.text_channels, name=UPDATE_CHANNEL_NAME)
+            if channel is not None:
+                return channel
+        return None
 
     def _find_snapshot_by_team(self, team_name: str):
         for snapshot in self._snapshots.values():
