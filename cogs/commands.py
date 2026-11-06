@@ -7,7 +7,6 @@ from discord.ext import commands
 
 from config import (
     ACCUMULATORS_FILE,
-    CONFIG_FILE,
     MATCH_STATE_FILE,
     STANDINGS_FILE,
     ROSTER_FILE,
@@ -439,13 +438,6 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
         if len(message) > 1900:
             message = message[:1900] + "\n… (truncated, try a smaller `count`)"
         await interaction.response.send_message(message)
-
-    @app_commands.command(description="Set this channel as the destination for live match updates")
-    async def setchannel(self, interaction: discord.Interaction):
-        cfg = await storage.read_json(CONFIG_FILE, {})
-        cfg["update_channel_id"] = interaction.channel_id
-        await storage.write_json(CONFIG_FILE, cfg)
-        await interaction.response.send_message(f"Live updates will be posted in {interaction.channel.mention}.")
 
 
 async def setup(bot: commands.Bot, espn_client, poller, odds_client):
