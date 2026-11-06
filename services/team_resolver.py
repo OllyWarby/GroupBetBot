@@ -1,8 +1,3 @@
-"""Resolves a human-typed team name (e.g. "Arsenal", "man utd") to the
-ESPN team ID + league slug we need for polling, and caches the result so
-we don't re-search the API every time.
-"""
-
 import logging
 
 from config import LEAGUE_SLUGS, TEAM_CACHE_FILE
@@ -35,12 +30,6 @@ def _normalize(name: str) -> str:
 
 
 async def resolve_team(client: EspnClient, team_name: str) -> dict:
-    """Resolve a team name across all supported leagues.
-
-    Returns a dict: {"name": display_name, "espn_id": ..., "league": slug}.
-    Raises TeamNotFoundError or AmbiguousTeamError if it can't confidently
-    resolve one team.
-    """
     cache = await _load_cache()
     key = _normalize(team_name)
     if key in cache:
@@ -77,8 +66,6 @@ async def resolve_team(client: EspnClient, team_name: str) -> dict:
     if not matches:
         raise TeamNotFoundError(team_name)
     if len(matches) > 1:
-        # Same/similar name across leagues (rare, but possible) - let the
-        # caller decide rather than silently guessing.
         raise AmbiguousTeamError(matches)
 
     result = matches[0]

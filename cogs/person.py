@@ -5,10 +5,6 @@ from discord.ext import commands
 from services.poller import STATUS_LABELS
 import services.people_store as people_store
 
-# Our own outcome sentinels (see cogs/commands.py's _leg_result) on top of
-# whatever ESPN status labels the leg never got past (STATUS_LABELS below) -
-# e.g. a postponed leg should show "postponed", not the raw
-# "STATUS_POSTPONED", same as /acc history already does.
 RESULT_LABELS = {
     "win": "✅ win",
     "loss": "❌ loss",

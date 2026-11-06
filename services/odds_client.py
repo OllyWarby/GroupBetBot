@@ -1,18 +1,3 @@
-"""Thin async client for The Odds API (the-odds-api.com) - free tier used
-for pre-match head-to-head (match winner) prices.
-
-Coverage caveat: the free tier is confirmed for EPL and EFL Championship,
-but League One/Two coverage is NOT confirmed, and the provider doesn't
-publish stable sport_key names for every competition. Rather than hardcode
-guessed keys, this looks up the sport list by title (see
-config.ODDS_LEAGUE_TITLE_HINTS) and returns None - treated by callers as
-"odds unavailable" - when a league or fixture can't be matched.
-
-All provider-specific knowledge lives in this one file on purpose, so
-swapping to a different odds provider later is a one-file change, same
-pattern as services/espn_client.py.
-"""
-
 import asyncio
 import logging
 import time
@@ -49,14 +34,8 @@ def _normalize(name: str) -> str:
 class OddsClient:
     def __init__(self):
         self._session: aiohttp.ClientSession | None = None
-        # league_key -> sport_key, or None if we've confirmed this
-        # provider doesn't cover that league. Cached for the process
-        # lifetime since the sport list rarely changes - but only once we
-        # actually got a successful answer (see _sport_key_for_league), so
-        # a transient fetch failure doesn't get cached as "not covered".
         self._sport_key_cache: dict[str, str | None] = {}
         self._sports_list_cache: list[dict] | None = None
-        # sport_key -> (fetched_at, events) - see ODDS_BOARD_CACHE_SECONDS.
         self._odds_board_cache: dict[str, tuple[float, list]] = {}
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -97,7 +76,7 @@ class OddsClient:
                 if attempt < _MAX_RETRIES and not isinstance(e, OddsClientError):
                     await asyncio.sleep(_RETRY_BACKOFF_SECONDS)
                 elif isinstance(e, OddsClientError):
-                    break  # no point retrying a bad key / quota hit
+                    break
         raise OddsClientError(f"Failed to fetch {path}: {last_error}")
 
     async def _get_sports_list(self) -> list[dict]:
@@ -112,9 +91,6 @@ class OddsClient:
         try:
             sports = await self._get_sports_list()
         except OddsClientError as e:
-            # Don't cache a fetch failure as "not covered" - a transient
-            # blip should just be retried on the next call, not lock this
-            # league out of odds for the rest of the process's life.
             logger.warning("Could not fetch odds sports list: %s", e)
             return None
 
@@ -148,14 +124,6 @@ class OddsClient:
         return events
 
     async def get_best_price(self, league_key: str, team_name: str) -> tuple[float, str] | None:
-        """Best (highest) decimal price for `team_name` to win their next
-        fixture, and the bookmaker offering it.
-
-        Returns None if odds are disabled (ODDS_ENABLED=false), this
-        provider doesn't cover the league, the fixture/outcome can't be
-        matched, or the request fails - callers should treat all of that
-        as "odds unavailable", not an error.
-        """
         if not ODDS_ENABLED:
             return None
 
@@ -191,4 +159,4 @@ class OddsClient:
                             best_bookmaker = bookmaker.get("title", "")
             return (best_price, best_bookmaker) if best_price is not None else None
 
-        return None  # no fixture found for this team on the current odds board
+        return None

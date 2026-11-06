@@ -83,15 +83,8 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
         roster = await storage.read_json(ROSTER_FILE, DEFAULT_ROSTER)
         slot_roster = roster.get(slot, [])
         for i, team in enumerate(resolved):
-            # Snapshot the person for this position now, rather than
-            # re-reading the roster later - if /acc setnames is run again
-            # mid-bet, this accumulator should keep who was set when it
-            # was set, not silently pick up the new roster.
             team["person"] = slot_roster[i] if i < len(slot_roster) else None
 
-        # Independent per-team lookups - run them concurrently rather than
-        # one at a time, so a 4-team accumulator isn't paying for 4
-        # sequential network round-trips before it can respond.
         odds_results = await asyncio.gather(*(self._fetch_odds(team) for team in resolved))
         for team, (odds, bookmaker) in zip(resolved, odds_results):
             team["odds"], team["odds_bookmaker"] = odds, bookmaker
@@ -136,10 +129,6 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
         return next_fixture_from_team_profile(profile, team["name"])
 
     async def _team_summary_lines(self, teams: list[dict]) -> list[str]:
-        """For each resolved team: who it's assigned to, its odds, and its
-        next fixture from ESPN (Discord timestamp markup so it renders in
-        each viewer's own timezone).
-        """
         people = await people_store.load_people()
         fixtures = await asyncio.gather(*(self._fetch_fixture(team) for team in teams))
 
@@ -168,10 +157,6 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
         return lines
 
     async def _kickoff_lines(self, teams: list[dict]) -> list[str]:
-        """For each resolved team, fetch its next fixture from ESPN and
-        return one human-readable line per team (Discord timestamp markup
-        so it renders in each viewer's own timezone).
-        """
         lines = []
         for team in teams:
             try:
@@ -343,13 +328,6 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
 
     @staticmethod
     def _leg_result(result: dict | None, locked_win: bool) -> str:
-        """Win/loss (or the raw match status if it never finished) for one
-        leg, given the {opponent, score, status, is_home} dict `_result_for`
-        already resolved for it. Uses the same is_winning_leg rule the
-        poller's live status display uses (a draw counts as a loss, an
-        early-payout lock counts as a win regardless of the final score),
-        so the two can't drift apart.
-        """
         if result is None:
             return "no_data"
         if result["status"] != "STATUS_FULL_TIME":
@@ -364,12 +342,6 @@ class AccumulatorCommands(commands.GroupCog, name="acc"):
         return "win" if is_winning_leg(team_score, opp_score, locked_win) else "loss"
 
     async def _archive_people_history(self, accumulators: dict, result_for, archived_at: str):
-        """Record each named team's leg into data/people.json, reusing the
-        same {opponent, score, status} lookup `newbet` already ran against
-        match_state.json for the standings.json archive. Teams with no
-        name assigned (roster wasn't set when /acc set ran) are skipped -
-        there's nobody to attribute them to.
-        """
         people = await people_store.load_people()
         changed = False
 
