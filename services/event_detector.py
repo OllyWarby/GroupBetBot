@@ -90,14 +90,23 @@ def diff_snapshots(old: MatchSnapshot | None, new: MatchSnapshot) -> list[str]:
 
     events = []
 
-    if new.home_score != old.home_score or new.away_score != old.away_score:
-        minute = f" {new.display_clock}" if new.display_clock else ""
+    minute = f" {new.display_clock}" if new.display_clock else ""
+
+    home_down = new.home_score < old.home_score
+    away_down = new.away_score < old.away_score
+    if home_down or away_down:
+        home_label = f"**{new.home_name}**" if home_down else new.home_name
+        away_label = f"**{new.away_name}**" if away_down else new.away_name
+        events.append(
+            f"\U0001F6AB{minute} Goal disallowed: "
+            f"{home_label} {new.home_score}-{new.away_score} {away_label}"
+        )
+
+    if new.home_score > old.home_score or new.away_score > old.away_score:
         if new.home_score > old.home_score:
             home_label, away_label = f"**{new.home_name}**", new.away_name
-        elif new.away_score > old.away_score:
-            home_label, away_label = new.home_name, f"**{new.away_name}**"
         else:
-            home_label, away_label = new.home_name, new.away_name
+            home_label, away_label = new.home_name, f"**{new.away_name}**"
         events.append(
             f"\u26bd{minute} {home_label} {new.home_score}-{new.away_score} {away_label}"
         )

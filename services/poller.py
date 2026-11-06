@@ -22,6 +22,7 @@ from services.event_detector import (
     extract_new_card_events,
     is_winning_leg,
     team_with_early_payout_lead,
+    EARLY_PAYOUT_GOAL_MARGIN,
 )
 import storage
 
@@ -50,6 +51,8 @@ def _embed_color(events: list[str]) -> discord.Color:
     joined = " ".join(events)
     if "⚽" in joined:  # goal
         return discord.Color.green()
+    if "\U0001F6AB" in joined:  # goal disallowed
+        return discord.Color.red()
     if "\U0001F512" in joined:  # early payout locked in
         return discord.Color.gold()
     if "\U0001F7E2" in joined:  # kick-off
@@ -170,6 +173,41 @@ class Poller:
                 f"{result_icon} {name} {team_score}-{opp_score} {opponent} ({label})"
             )
         return "\n".join(lines)
+
+    async def _release_early_payouts(self, old: MatchSnapshot, snapshot: MatchSnapshot) -> list[str]:
+        sides = (
+            (snapshot.home_name, old.home_score, snapshot.home_score, snapshot.away_score),
+            (snapshot.away_name, old.away_score, snapshot.away_score, snapshot.home_score),
+        )
+        # A team's own score dropped and it no longer has a qualifying lead.
+        candidates = {
+            name
+            for name, old_score, new_score, opp_score in sides
+            if new_score < old_score and new_score - opp_score < EARLY_PAYOUT_GOAL_MARGIN
+        }
+        if not candidates:
+            return []
+
+        accumulators = await storage.read_json(ACCUMULATORS_FILE, {})
+        released = set()
+        for acc in accumulators.values():
+            for team in acc.get("teams", []):
+                if not isinstance(team, dict) or team.get("name") not in candidates:
+                    continue
+                if not team.get("locked_win"):
+                    continue
+                team.pop("locked_win", None)
+                team.pop("locked_score", None)
+                released.add(team["name"])
+
+        if not released:
+            return []
+
+        await storage.write_json(ACCUMULATORS_FILE, accumulators)
+        return [
+            f"\U0001F513 {name} early payout removed - goal disallowed"
+            for name in sorted(released)
+        ]
 
     async def _lock_in_early_payouts(self, snapshot: MatchSnapshot) -> list[str]:
         lead = team_with_early_payout_lead(snapshot)
@@ -336,6 +374,16 @@ class Poller:
                     "score": f"{snapshot.home_score}-{snapshot.away_score}",
                     "status": snapshot.status,
                 }
+
+                if old is not None and (
+                    snapshot.home_score < old.home_score or snapshot.away_score < old.away_score
+                ):
+                    try:
+                        text_events.extend(await self._release_early_payouts(old, snapshot))
+                    except Exception:
+                        logger.exception(
+                            "Failed to release early payout for event %s", snapshot.event_id
+                        )
 
                 if old is None or text_events:
                     try:
