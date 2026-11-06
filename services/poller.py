@@ -52,8 +52,6 @@ def _embed_color(events: list[str]) -> discord.Color:
         return discord.Color.green()
     if "\U0001F512" in joined:  # early payout locked in
         return discord.Color.gold()
-    if "\U0001F7E5" in joined:  # red card
-        return discord.Color.red()
     if "\U0001F7E2" in joined:  # kick-off
         return discord.Color.blue()
     if "FT" in joined:  # full-time
@@ -97,6 +95,7 @@ class Poller:
                 home_score=home_score,
                 away_score=away_score,
                 status=entry.get("status", "STATUS_SCHEDULED"),
+                seen_incident_ids=set(entry.get("seen_incidents", [])),
             )
             restored += 1
         if restored:
@@ -229,6 +228,17 @@ class Poller:
             except Exception:
                 logger.exception("Failed to post update for accumulator %s", slot)
 
+    async def _post_red_cards(self, channel: discord.abc.Messageable | None, lines: list[str]):
+        if channel is None:
+            logger.info("Red card(s) detected but no update channel set: %s", lines)
+            return
+
+        for line in lines:
+            try:
+                await channel.send(line)
+            except Exception:
+                logger.exception("Failed to post red card line")
+
     async def _post_halftime_updates(
         self, channel: discord.abc.Messageable | None, halftime_matches: list[MatchSnapshot]
     ):
@@ -289,6 +299,7 @@ class Poller:
         this_tick_matches = []
         events_this_tick: list[tuple] = []
         halftime_matches: list[MatchSnapshot] = []  # matches that just reached half-time
+        red_card_lines: list[str] = []
 
         for slug in LEAGUE_SLUGS.values():
             try:
@@ -334,10 +345,10 @@ class Poller:
                             "Failed to check early payout for event %s", snapshot.event_id
                         )
 
-                if text_events and snapshot.state == "in":
+                if snapshot.state == "in":
                     try:
                         summary = await self.client.get_summary(slug, snapshot.event_id)
-                        text_events.extend(extract_new_card_events(summary, snapshot))
+                        red_card_lines.extend(extract_new_card_events(summary, snapshot))
                     except EspnClientError as e:
                         logger.warning("Summary fetch failed for event %s: %s", snapshot.event_id, e)
                     except Exception:
@@ -345,10 +356,15 @@ class Poller:
                             "Failed to enrich event(s) for %s with summary detail", snapshot.event_id
                         )
 
+                state_dump[snapshot.event_id]["seen_incidents"] = sorted(snapshot.seen_incident_ids)
+
                 if text_events:
                     events_this_tick.append((snapshot, text_events))
 
         await storage.write_json(MATCH_STATE_FILE, state_dump)
+
+        if red_card_lines:
+            await self._post_red_cards(channel, red_card_lines)
 
         if events_this_tick:
             await self._post_accumulator_updates(channel, events_this_tick)
