@@ -111,13 +111,9 @@ def diff_snapshots(old: MatchSnapshot | None, new: MatchSnapshot) -> list[str]:
             f"\u26bd{minute} {home_label} {new.home_score}-{new.away_score} {away_label}"
         )
 
-    if new.status != old.status:
-        if new.status == "STATUS_FULL_TIME":
-            events.append(
-                f"\U0001F3C1 FT {new.home_name} {new.home_score}-{new.away_score} {new.away_name}"
-            )
-        elif new.state == "in" and old.status == "STATUS_SCHEDULED":
-            events.append(f"\U0001F7E2 KO {new.home_name} v {new.away_name}")
+    # Full-time isn't reported per match: the poller posts one final update once the whole accumulator is done.
+    if new.status != old.status and new.state == "in" and old.status == "STATUS_SCHEDULED":
+        events.append(f"\U0001F7E2 KO {new.home_name} v {new.away_name}")
 
     return events
 

@@ -54,6 +54,11 @@ def _team_label(entry) -> str:
     return f"{person} · {name}" if person else name
 
 
+def _leg_owner(entry) -> str:
+    person = entry.get("person") if isinstance(entry, dict) else None
+    return person or _team_name(entry)
+
+
 def _embed_color(events: list[str]) -> discord.Color:
     joined = " ".join(events)
     if "⚽" in joined:  # goal
@@ -183,6 +188,73 @@ class Poller:
             )
         return "\n".join(lines)
 
+    def _leg_results(self, acc: dict) -> list[tuple[str, bool]] | None:
+        """(owner, currently winning) per leg, or None unless every leg has kicked off."""
+        results = []
+        for team in acc.get("teams", []):
+            snapshot = self._find_snapshot_by_team(_team_name(team))
+            if snapshot is None or snapshot.status not in LIVE_OR_PAUSED_STATUSES | {"STATUS_FULL_TIME"}:
+                return None
+
+            is_home = snapshot.home_name == _team_name(team)
+            team_score = snapshot.home_score if is_home else snapshot.away_score
+            opp_score = snapshot.away_score if is_home else snapshot.home_score
+            locked = isinstance(team, dict) and team.get("locked_win")
+            results.append((_leg_owner(team), is_winning_leg(team_score, opp_score, locked)))
+        return results
+
+    def _lone_loser(self, acc: dict) -> tuple[str, list[str]] | None:
+        """(loser, everyone else) when every leg has kicked off and exactly one is losing, else None."""
+        results = self._leg_results(acc)
+        if results is None:
+            return None
+        losers = [owner for owner, winning in results if not winning]
+        others = [owner for owner, winning in results if winning]
+        if len(losers) == 1 and others:
+            return losers[0], others
+        return None
+
+    def _add_pint_watch(self, embed: discord.Embed, acc: dict):
+        verdict = self._lone_loser(acc)
+        if verdict is None:
+            return
+        loser, others = verdict
+        embed.add_field(
+            name="\U0001F37A PINT WATCH \U0001F37A",
+            value=f"\U0001F37B **{loser} is on for pints!** \U0001F37B",
+            inline=False,
+        )
+
+    def _build_full_time_embed(self, slot: str, acc: dict) -> tuple[discord.Embed, str | None]:
+        verdict = self._lone_loser(acc)
+        status = self._format_accumulator_status(acc)
+
+        if verdict is not None:
+            loser, _ = verdict
+            beer_row = "\U0001F37A\U0001F37B" * 6
+            embed = discord.Embed(
+                title=f"\U0001F37B\U0001F6A8 PINTS ALERT - Accumulator {slot} \U0001F6A8\U0001F37B",
+                description=(
+                    f"{beer_row}\n"
+                    f"# \U0001F3C6 {loser.upper()} IS BUYING! \U0001F3C6\n"
+                    f"{beer_row}"
+                ),
+                color=discord.Color.from_rgb(242, 169, 0),  # beer
+            )
+            embed.add_field(name="\U0001F3C1 Final scores", value=status, inline=False)
+            return embed, "\U0001F6A8\U0001F37A\U0001F37B **PINTS ALERT** \U0001F37B\U0001F37A\U0001F6A8"
+
+        results = self._leg_results(acc)
+        all_won = results is not None and all(winning for _, winning in results)
+        embed = discord.Embed(
+            title=f"\U0001F3C1 Accumulator {slot} - full time",
+            description="\U0001F389 **Every leg came in - accumulator landed!** \U0001F389" if all_won
+            else "\U0001F480 **Accumulator busted.**",
+            color=discord.Color.gold() if all_won else discord.Color.dark_grey(),
+        )
+        embed.add_field(name="Final scores", value=status, inline=False)
+        return embed, None
+
     async def _release_early_payouts(self, old: MatchSnapshot, snapshot: MatchSnapshot) -> list[str]:
         sides = (
             (snapshot.home_name, old.home_score, snapshot.home_score, snapshot.away_score),
@@ -270,6 +342,7 @@ class Poller:
                 color=_embed_color(slot_events),
             )
             embed.add_field(name="Status", value=self._format_accumulator_status(acc), inline=False)
+            self._add_pint_watch(embed, acc)
             try:
                 await channel.send(embed=embed)
             except Exception:
@@ -328,10 +401,44 @@ class Poller:
                 description=self._format_accumulator_status(acc),
                 color=discord.Color.light_grey(),
             )
+            self._add_pint_watch(embed, acc)
             try:
                 await channel.send(embed=embed)
             except Exception:
                 logger.exception("Failed to post half-time update for accumulator %s", slot)
+
+    async def _post_full_time_updates(
+        self, channel: discord.abc.Messageable | None, finished_matches: list[MatchSnapshot]
+    ):
+        if channel is None:
+            logger.info("Full-time(s) detected but no update channel set: %s", finished_matches)
+            return
+
+        accumulators = await storage.read_json(ACCUMULATORS_FILE, {})
+        for slot, acc in accumulators.items():
+            team_names = [_team_name(t) for t in acc.get("teams", [])]
+            if not team_names:
+                continue
+
+            just_finished = any(
+                s.home_name in team_names or s.away_name in team_names for s in finished_matches
+            )
+            if not just_finished:
+                continue
+
+            all_at_full_time = all(
+                (snap := self._find_snapshot_by_team(name)) is not None
+                and snap.status == "STATUS_FULL_TIME"
+                for name in team_names
+            )
+            if not all_at_full_time:
+                continue
+
+            embed, content = self._build_full_time_embed(slot, acc)
+            try:
+                await channel.send(content=content, embed=embed)
+            except Exception:
+                logger.exception("Failed to post full-time update for accumulator %s", slot)
 
     async def _tick(self) -> float:
         tracked_names = await self._tracked_team_names()
@@ -346,6 +453,7 @@ class Poller:
         this_tick_matches = []
         events_this_tick: list[tuple] = []
         halftime_matches: list[MatchSnapshot] = []  # matches that just reached half-time
+        finished_matches: list[MatchSnapshot] = []  # matches that just reached full-time
         red_card_lines: list[str] = []
 
         for slug in LEAGUE_SLUGS.values():
@@ -373,6 +481,12 @@ class Poller:
                     and snapshot.status == "STATUS_HALFTIME"
                 ):
                     halftime_matches.append(snapshot)
+                if (
+                    old is not None
+                    and old.status != "STATUS_FULL_TIME"
+                    and snapshot.status == "STATUS_FULL_TIME"
+                ):
+                    finished_matches.append(snapshot)
 
                 self._snapshots[snapshot.event_id] = snapshot
                 this_tick_matches.append(snapshot)
@@ -428,6 +542,9 @@ class Poller:
 
         if halftime_matches:
             await self._post_halftime_updates(channel, halftime_matches)
+
+        if finished_matches:
+            await self._post_full_time_updates(channel, finished_matches)
 
         if (
             self.on_all_finished
